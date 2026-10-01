@@ -11,13 +11,15 @@
   <a class="brand" href="/">PocketSmart <span>AI</span></a>
   <nav>
     {% if user %}
-      <a href="/dashboard">Dashboard</a>
-      <a href="/history">History</a>
-      <a href="/logout">Logout</a>
-    {% else %}
-      <a href="/login">Login</a>
-      <a class="nav-btn" href="/register">Get Started</a>
-    {% endif %}
+  <a href="/dashboard">Dashboard</a>
+  <a href="/history">History</a>
+  <a href="/testimonials">Testimonials</a>
+  <a href="/logout">Logout</a>
+{% else %}
+  <a href="/testimonials">Testimonials</a>
+  <a href="/login">Login</a>
+  <a class="nav-btn" href="/register">Get Started</a>
+{% endif %}
   </nav>
 </header>
 <main>{% block content %}{% endblock %}</main>

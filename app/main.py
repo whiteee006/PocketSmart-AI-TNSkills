@@ -1,5 +1,7 @@
 import os
+import uuid
 from pathlib import Path
+from datetime import datetime, timedelta, timezone
 
 from fastapi import (
     FastAPI,
@@ -9,11 +11,18 @@ from fastapi import (
     UploadFile,
     HTTPException,
 )
+
+from pydantic import ValidationError
+
 from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
+
 from starlette.middleware.sessions import SessionMiddleware
+from starlette.middleware.cors import CORSMiddleware
+
 from dotenv import load_dotenv
+from jose import JWTError, jwt
 
 from app.services.auth_service import (
     register_user,
@@ -60,17 +69,85 @@ app = FastAPI(
 
 
 # ============================================================
-# SESSION MIDDLEWARE
+# CORS CONFIGURATION
 # ============================================================
 
 app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+
+# ============================================================
+# SESSION CONFIGURATION
+# ============================================================
+
+SESSION_SECRET = os.getenv(
+    "SESSION_SECRET",
+    "change-this-secret",
+)
+
+app.add_middleware(
     SessionMiddleware,
-    secret_key=os.getenv(
-        "SESSION_SECRET",
-        "change-this-secret",
-    ),
+    secret_key=SESSION_SECRET,
     max_age=60 * 60 * 24 * 7,
 )
+
+
+# ============================================================
+# JWT CONFIGURATION
+# ============================================================
+
+JWT_SECRET = os.getenv(
+    "JWT_SECRET",
+    SESSION_SECRET,
+)
+
+JWT_ALGORITHM = "HS256"
+
+try:
+    JWT_EXPIRE_MINUTES = int(
+        os.getenv(
+            "JWT_EXPIRE_MINUTES",
+            "0",
+        )
+    )
+except ValueError:
+    JWT_EXPIRE_MINUTES = 0
+
+
+# ============================================================
+# UPLOAD CONFIGURATION
+# ============================================================
+
+UPLOAD_DIR = (
+    BASE_DIR
+    / "static"
+    / "uploads"
+)
+
+UPLOAD_DIR.mkdir(
+    parents=True,
+    exist_ok=True,
+)
+
+ALLOWED_IMAGE_EXTENSIONS = {
+    ".jpg",
+    ".jpeg",
+    ".png",
+    ".webp",
+}
+
+ALLOWED_IMAGE_CONTENT_TYPES = {
+    "image/jpeg",
+    "image/png",
+    "image/webp",
+}
+
+MAX_IMAGE_SIZE = 5 * 1024 * 1024  # 5 MB
 
 
 # ============================================================
@@ -79,13 +156,17 @@ app.add_middleware(
 
 app.mount(
     "/static",
-    StaticFiles(directory=BASE_DIR / "static"),
+    StaticFiles(
+        directory=BASE_DIR / "static"
+    ),
     name="static",
 )
 
 app.mount(
     "/uploads",
-    StaticFiles(directory=BASE_DIR / "static" / "uploads"),
+    StaticFiles(
+        directory=UPLOAD_DIR
+    ),
     name="uploads",
 )
 
@@ -105,9 +186,13 @@ templates = Jinja2Templates(
 
 def current_user(request: Request):
     """
-    Return the currently logged-in user.
+    Return the currently logged-in user
+    from the browser session.
     """
-    email = request.session.get("user_email")
+
+    email = request.session.get(
+        "user_email"
+    )
 
     if not email:
         return None
@@ -117,8 +202,9 @@ def current_user(request: Request):
 
 def require_user(request: Request):
     """
-    Require an authenticated user.
+    Require an authenticated browser session.
     """
+
     user = current_user(request)
 
     if not user:
@@ -131,10 +217,79 @@ def require_user(request: Request):
 
 
 # ============================================================
+# JWT HELPERS
+# ============================================================
+
+def create_access_token(email: str) -> str:
+    """
+    Create a JWT access token.
+
+    JWT_EXPIRE_MINUTES = 0
+    means the token has no expiration claim.
+
+    JWT_EXPIRE_MINUTES > 0
+    means the token expires after the
+    configured number of minutes.
+    """
+
+    payload = {
+        "sub": email,
+    }
+
+    if JWT_EXPIRE_MINUTES > 0:
+
+        expire = (
+            datetime.now(timezone.utc)
+            + timedelta(
+                minutes=JWT_EXPIRE_MINUTES
+            )
+        )
+
+        payload["exp"] = expire
+
+    return jwt.encode(
+        payload,
+        JWT_SECRET,
+        algorithm=JWT_ALGORITHM,
+    )
+
+
+def get_email_from_token(
+    token: str,
+) -> str | None:
+    """
+    Decode a JWT token and return
+    the user's email.
+    """
+
+    try:
+
+        payload = jwt.decode(
+            token,
+            JWT_SECRET,
+            algorithms=[JWT_ALGORITHM],
+        )
+
+        email = payload.get("sub")
+
+        if not email:
+            return None
+
+        return str(email).strip().lower()
+
+    except JWTError:
+
+        return None
+
+
+# ============================================================
 # HOME
 # ============================================================
 
-@app.get("/", response_class=HTMLResponse)
+@app.get(
+    "/",
+    response_class=HTMLResponse,
+)
 async def home(request: Request):
 
     return templates.TemplateResponse(
@@ -148,11 +303,36 @@ async def home(request: Request):
 
 
 # ============================================================
+# TESTIMONIALS
+# ============================================================
+
+@app.get(
+    "/testimonials",
+    response_class=HTMLResponse,
+)
+async def testimonials(request: Request):
+
+    return templates.TemplateResponse(
+        request=request,
+        name="testimonials.html",
+        context={
+            "request": request,
+            "user": current_user(request),
+        },
+    )
+
+
+# ============================================================
 # REGISTER PAGE
 # ============================================================
 
-@app.get("/register", response_class=HTMLResponse)
-async def register_page(request: Request):
+@app.get(
+    "/register",
+    response_class=HTMLResponse,
+)
+async def register_page(
+    request: Request,
+):
 
     return templates.TemplateResponse(
         request=request,
@@ -198,7 +378,9 @@ async def register(
             status_code=400,
         )
 
-    request.session["user_email"] = clean_email
+    request.session[
+        "user_email"
+    ] = clean_email
 
     return RedirectResponse(
         "/dashboard",
@@ -210,8 +392,13 @@ async def register(
 # LOGIN PAGE
 # ============================================================
 
-@app.get("/login", response_class=HTMLResponse)
-async def login_page(request: Request):
+@app.get(
+    "/login",
+    response_class=HTMLResponse,
+)
+async def login_page(
+    request: Request,
+):
 
     return templates.TemplateResponse(
         request=request,
@@ -254,7 +441,9 @@ async def login(
             status_code=401,
         )
 
-    request.session["user_email"] = user["email"]
+    request.session[
+        "user_email"
+    ] = user["email"]
 
     return RedirectResponse(
         "/dashboard",
@@ -267,7 +456,9 @@ async def login(
 # ============================================================
 
 @app.get("/logout")
-async def logout(request: Request):
+async def logout(
+    request: Request,
+):
 
     request.session.clear()
 
@@ -278,7 +469,7 @@ async def logout(request: Request):
 
 
 # ============================================================
-# TOKEN ROUTE
+# TOKEN API
 # ============================================================
 
 @app.post("/token")
@@ -296,48 +487,73 @@ async def token(
     )
 
     if not user:
+
         raise HTTPException(
             status_code=401,
             detail="Invalid credentials",
         )
 
-    request.session["user_email"] = user["email"]
+    access_token = create_access_token(
+        user["email"]
+    )
+
+    request.session[
+        "user_email"
+    ] = user["email"]
 
     return {
-        "access_token": user["email"],
-        "token_type": "session",
+        "access_token": access_token,
+        "token_type": "bearer",
+        "expires_in": (
+            None
+            if JWT_EXPIRE_MINUTES == 0
+            else JWT_EXPIRE_MINUTES * 60
+        ),
+        "user": user_public(user),
     }
 
 
 # ============================================================
-# SESSION INFO
+# SESSION INFO API
 # ============================================================
 
 @app.get("/session-info")
-async def session_info(request: Request):
+async def session_info(
+    request: Request,
+):
 
     user = current_user(request)
 
     return {
         "logged_in": bool(user),
-        "user": user_public(user) if user else None,
+        "session_active": bool(user),
+        "user": (
+            user_public(user)
+            if user
+            else None
+        ),
     }
 
 
 # ============================================================
-# SESSION DATA
+# SESSION DATA API
 # ============================================================
 
 @app.get("/session-data")
-async def session_data(request: Request):
+async def session_data(
+    request: Request,
+):
 
     user = require_user(request)
 
+    history = get_history(
+        user["email"]
+    )
+
     return {
         "user": user_public(user),
-        "history_count": len(
-            get_history(user["email"])
-        ),
+        "history_count": len(history),
+        "history": history,
     }
 
 
@@ -345,8 +561,13 @@ async def session_data(request: Request):
 # DASHBOARD
 # ============================================================
 
-@app.get("/dashboard", response_class=HTMLResponse)
-async def dashboard(request: Request):
+@app.get(
+    "/dashboard",
+    response_class=HTMLResponse,
+)
+async def dashboard(
+    request: Request,
+):
 
     user = require_user(request)
 
@@ -369,8 +590,13 @@ async def dashboard(request: Request):
 # HOME PLANNER PAGE
 # ============================================================
 
-@app.get("/home-planner", response_class=HTMLResponse)
-async def home_planner(request: Request):
+@app.get(
+    "/home-planner",
+    response_class=HTMLResponse,
+)
+async def home_planner(
+    request: Request,
+):
 
     user = require_user(request)
 
@@ -388,8 +614,13 @@ async def home_planner(request: Request):
 # PARTY PLANNER PAGE
 # ============================================================
 
-@app.get("/party-planner", response_class=HTMLResponse)
-async def party_planner(request: Request):
+@app.get(
+    "/party-planner",
+    response_class=HTMLResponse,
+)
+async def party_planner(
+    request: Request,
+):
 
     user = require_user(request)
 
@@ -407,8 +638,13 @@ async def party_planner(request: Request):
 # JEWELRY PLANNER PAGE
 # ============================================================
 
-@app.get("/jewelry-planner", response_class=HTMLResponse)
-async def jewelry_planner(request: Request):
+@app.get(
+    "/jewelry-planner",
+    response_class=HTMLResponse,
+)
+async def jewelry_planner(
+    request: Request,
+):
 
     user = require_user(request)
 
@@ -427,38 +663,73 @@ async def jewelry_planner(request: Request):
 # ============================================================
 
 @app.post("/generate-home")
-async def generate_home(request: Request):
+async def generate_home(
+    request: Request,
+):
 
     user = require_user(request)
 
     form = await request.form()
 
-    data = HomePlannerInput(
-        budget=float(
-            form.get("budget", 0)
-        ),
-        room_type=str(
-            form.get(
-                "room_type",
-                "Living Room",
-            )
-        ),
-        quantity=int(
-            form.get("quantity", 1)
-        ),
-        style=str(
-            form.get(
-                "style",
-                "Modern",
-            )
-        ),
-        needs=str(
-            form.get("needs", "")
-        ),
-    )
+    try:
 
-    result = await generate_home_recommendations(
-        data
+        data = HomePlannerInput(
+            budget=float(
+                form.get(
+                    "budget",
+                    0,
+                )
+            ),
+            room_type=str(
+                form.get(
+                    "room_type",
+                    "",
+                )
+            ),
+            quantity=int(
+                form.get(
+                    "quantity",
+                    1,
+                )
+            ),
+            style=str(
+                form.get(
+                    "style",
+                    "",
+                )
+            ),
+            needs=str(
+                form.get(
+                    "needs",
+                    "",
+                )
+            ),
+        )
+
+    except (
+        ValueError,
+        TypeError,
+    ):
+
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "Please enter valid values "
+                "for all Home Planner fields."
+            ),
+        )
+
+    except ValidationError as exc:
+
+        raise HTTPException(
+            status_code=422,
+            detail=exc.errors(),
+        )
+
+    result = (
+        await generate_home_recommendations(
+            data
+        )
     )
 
     save_history(
@@ -486,35 +757,73 @@ async def generate_home(request: Request):
 # ============================================================
 
 @app.post("/generate-party")
-async def generate_party(request: Request):
+async def generate_party(
+    request: Request,
+):
 
     user = require_user(request)
 
     form = await request.form()
 
-    data = PartyPlannerInput(
-        budget=float(
-            form.get("budget", 0)
-        ),
-        guest_count=int(
-            form.get("guest_count", 1)
-        ),
-        event_type=str(
-            form.get(
-                "event_type",
-                "Birthday",
-            )
-        ),
-        venue=str(
-            form.get("venue", "")
-        ),
-        preferences=str(
-            form.get("preferences", "")
-        ),
-    )
+    try:
 
-    result = await generate_party_recommendations(
-        data
+        data = PartyPlannerInput(
+            budget=float(
+                form.get(
+                    "budget",
+                    0,
+                )
+            ),
+            guest_count=int(
+                form.get(
+                    "guest_count",
+                    1,
+                )
+            ),
+            event_type=str(
+                form.get(
+                    "event_type",
+                    "",
+                )
+            ),
+            venue=str(
+                form.get(
+                    "venue",
+                    "",
+                )
+            ),
+            preferences=str(
+                form.get(
+                    "preferences",
+                    "",
+                )
+            ),
+        )
+
+    except (
+        ValueError,
+        TypeError,
+    ):
+
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "Please enter valid values "
+                "for all Party Planner fields."
+            ),
+        )
+
+    except ValidationError as exc:
+
+        raise HTTPException(
+            status_code=422,
+            detail=exc.errors(),
+        )
+
+    result = (
+        await generate_party_recommendations(
+            data
+        )
     )
 
     save_history(
@@ -553,91 +862,210 @@ async def generate_jewelry(
 
     user = require_user(request)
 
-    image_path = None
+    image_path: Path | None = None
 
     # --------------------------------------------------------
-    # OPTIONAL IMAGE UPLOAD
+    # CLEAN TEXT INPUTS
     # --------------------------------------------------------
 
-    if outfit_image and outfit_image.filename:
+    clean_occasion = occasion.strip()
+    clean_style = style.strip()
+    clean_outfit_notes = outfit_notes.strip()
 
-        suffix = Path(
-            outfit_image.filename
-        ).suffix.lower()
+    # --------------------------------------------------------
+    # OPTIONAL OUTFIT IMAGE
+    # --------------------------------------------------------
 
-        allowed_extensions = {
-            ".jpg",
-            ".jpeg",
-            ".png",
-            ".webp",
-        }
-
-        if suffix not in allowed_extensions:
-
-            raise HTTPException(
-                status_code=400,
-                detail=(
-                    "Only JPG, PNG and WEBP "
-                    "images are supported."
-                ),
-            )
-
-        upload_dir = (
-            BASE_DIR
-            / "static"
-            / "uploads"
-        )
-
-        upload_dir.mkdir(
-            parents=True,
-            exist_ok=True,
-        )
+    if (
+        outfit_image is not None
+        and outfit_image.filename
+    ):
 
         original_name = Path(
             outfit_image.filename
         ).name
 
-        safe_name = (
-            f"{user['id']}_"
-            f"{original_name.replace(' ', '_')}"
-        )
+        suffix = Path(
+            original_name
+        ).suffix.lower()
 
-        image_path = upload_dir / safe_name
+        # ----------------------------------------------------
+        # EXTENSION VALIDATION
+        # ----------------------------------------------------
 
-        image_path.write_bytes(
+        if (
+            suffix
+            not in ALLOWED_IMAGE_EXTENSIONS
+        ):
+
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "Only JPG, JPEG, PNG and WEBP "
+                    "images are supported."
+                ),
+            )
+
+        # ----------------------------------------------------
+        # CONTENT TYPE VALIDATION
+        # ----------------------------------------------------
+
+        content_type = (
+            outfit_image.content_type
+            or ""
+        ).lower()
+
+        if (
+            content_type
+            and content_type
+            not in ALLOWED_IMAGE_CONTENT_TYPES
+        ):
+
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "Invalid image content type. "
+                    "Please upload a JPG, PNG or WEBP image."
+                ),
+            )
+
+        # ----------------------------------------------------
+        # READ IMAGE BYTES
+        # ----------------------------------------------------
+
+        image_bytes = (
             await outfit_image.read()
         )
 
+        if not image_bytes:
+
+            raise HTTPException(
+                status_code=400,
+                detail="The uploaded image is empty.",
+            )
+
+        # ----------------------------------------------------
+        # IMAGE SIZE VALIDATION
+        # ----------------------------------------------------
+
+        if len(image_bytes) > MAX_IMAGE_SIZE:
+
+            raise HTTPException(
+                status_code=413,
+                detail=(
+                    "Image size must be 5 MB or less."
+                ),
+            )
+
+        # ----------------------------------------------------
+        # UNIQUE SAFE FILENAME
+        # ----------------------------------------------------
+
+        safe_original_name = (
+            original_name
+            .replace(" ", "_")
+            .replace("/", "_")
+            .replace("\\", "_")
+        )
+
+        unique_name = (
+            f"{user['id']}_"
+            f"{uuid.uuid4().hex}_"
+            f"{safe_original_name}"
+        )
+
+        image_path = (
+            UPLOAD_DIR
+            / unique_name
+        )
+
+        # ----------------------------------------------------
+        # SAVE IMAGE
+        # ----------------------------------------------------
+
+        try:
+
+            image_path.write_bytes(
+                image_bytes
+            )
+
+        except OSError as exc:
+
+            raise HTTPException(
+                status_code=500,
+                detail=(
+                    f"Unable to save uploaded image: {exc}"
+                ),
+            )
+
     # --------------------------------------------------------
-    # JEWELRY INPUT
+    # VALIDATE JEWELRY INPUT
     # --------------------------------------------------------
 
-    data = JewelryPlannerInput(
-        budget=budget,
-        occasion=occasion,
-        style=style,
-        outfit_notes=outfit_notes,
-        image_path=(
-            str(image_path)
-            if image_path
-            else None
-        ),
-    )
+    try:
+
+        data = JewelryPlannerInput(
+            budget=budget,
+            occasion=clean_occasion,
+            style=clean_style,
+            outfit_notes=clean_outfit_notes,
+            image_path=(
+                str(image_path)
+                if image_path
+                else None
+            ),
+        )
+
+    except ValidationError as exc:
+
+        if (
+            image_path
+            and image_path.exists()
+        ):
+
+            image_path.unlink()
+
+        raise HTTPException(
+            status_code=422,
+            detail=exc.errors(),
+        )
 
     # --------------------------------------------------------
-    # GENERATE RECOMMENDATIONS
+    # GENERATE JEWELRY RECOMMENDATIONS
     # --------------------------------------------------------
 
-    result = await generate_jewelry_recommendations(
-        data
-    )
+    try:
+
+        result = (
+            await generate_jewelry_recommendations(
+                data
+            )
+        )
+
+    except Exception:
+
+        # ----------------------------------------------
+        # Remove temporary uploaded image if generation
+        # fails unexpectedly.
+        # ----------------------------------------------
+
+        if (
+            image_path
+            and image_path.exists()
+        ):
+
+            image_path.unlink()
+
+        raise
 
     # --------------------------------------------------------
     # SAVE HISTORY
     # --------------------------------------------------------
 
     history_data = data.model_dump(
-        exclude={"image_path"}
+        exclude={
+            "image_path"
+        }
     )
 
     save_history(
@@ -665,11 +1093,16 @@ async def generate_jewelry(
 
 
 # ============================================================
-# LATEST RECOMMENDATION DETAILS
+# RECOMMENDATION DETAILS API
 # ============================================================
 
-@app.get("/recommendations-details")
-async def recommendation_details(request: Request):
+@app.get(
+    "/recommendations-details"
+)
+async def recommendation_details(
+    request: Request,
+    recommendation_id: str | None = None,
+):
 
     user = require_user(request)
 
@@ -680,18 +1113,54 @@ async def recommendation_details(request: Request):
     if not history:
 
         return {
-            "message": "No recommendations yet."
+            "found": False,
+            "message": (
+                "No recommendation "
+                "history found."
+            ),
+            "recommendation": None,
         }
 
-    return history[-1]
+    if recommendation_id:
+
+        for item in history:
+
+            item_id = str(
+                item.get(
+                    "id",
+                    "",
+                )
+            )
+
+            if (
+                item_id
+                == str(recommendation_id)
+            ):
+
+                return {
+                    "found": True,
+                    "recommendation": item,
+                }
+
+    latest = history[-1]
+
+    return {
+        "found": True,
+        "recommendation": latest,
+    }
 
 
 # ============================================================
 # HISTORY PAGE
 # ============================================================
 
-@app.get("/history", response_class=HTMLResponse)
-async def history_page(request: Request):
+@app.get(
+    "/history",
+    response_class=HTMLResponse,
+)
+async def history_page(
+    request: Request,
+):
 
     user = require_user(request)
 
@@ -715,7 +1184,9 @@ async def history_page(request: Request):
 # ============================================================
 
 @app.get("/api/history")
-async def history_api(request: Request):
+async def history_api(
+    request: Request,
+):
 
     user = require_user(request)
 
@@ -749,3 +1220,19 @@ async def health():
     return {
         "status": "healthy"
     }
+
+
+# ============================================================
+# DIRECT SERVER START
+# ============================================================
+
+if __name__ == "__main__":
+
+    import uvicorn
+
+    uvicorn.run(
+        "app.main:app",
+        host="127.0.0.1",
+        port=8000,
+        reload=True,
+    )
